@@ -1,0 +1,105 @@
+import pickle as pkl
+import json
+import numpy as np
+import torch
+from sklearn import preprocessing
+from sklearn.cluster import KMeans
+
+def read_pickle(file_path):
+    with open(file_path, 'rb') as f:
+        vec = pkl.load(f)
+        return vec
+
+
+def dump_pickle(file_path, obj):
+    with open(file_path, 'wb') as f:
+        pkl.dump(obj, f)
+
+
+def read_json(file_path):
+    with open(file_path, 'r') as f:
+        return json.load(f)
+
+
+def dump_json(file_path, obj):
+    with open(file_path, 'w') as f:
+        json.dump(obj, f)
+
+
+def remove_unseen_relation(dataset, seen_relations):
+    cleaned_data = []
+    for data in dataset:
+        neg_cands = [cand for cand in data[1] if cand in seen_relations]
+        if len(neg_cands) > 0:
+            cleaned_data.append([data[0], neg_cands, data[2]])
+        else:
+            cleaned_data.append([data[0], data[1][-2:], data[2]])
+    return cleaned_data
+
+def ranking_sequence(sequence):
+    word_lengths = torch.tensor([len(sentence) for sentence in sequence])
+    rankedi_word, indexs = word_lengths.sort(descending = True)
+    ranked_indexs, inverse_indexs = indexs.sort()
+    #print(indexs)
+    sequence = [sequence[i] for i in indexs]
+    return sequence, inverse_indexs
+
+def get_que_embed(model, sample_list, all_relations, batch_size, device,
+                  before_alignment=False):
+    ret_que_embeds = []
+    for i in range((len(sample_list)-1)//batch_size+1):
+        samples = sample_list[i*batch_size:(i+1)*batch_size]
+        questions = []
+        for item in samples:
+            this_question = torch.tensor(item[2], dtype=torch.long).to(device)
+            questions.append(this_question)
+        #print(len(questions))
+        model.init_hidden(device, len(questions))
+        ranked_questions, alignment_question_indexs = \
+            ranking_sequence(questions)
+        question_lengths = [len(question) for question in ranked_questions]
+        #print(ranked_questions)
+        pad_questions = torch.nn.utils.rnn.pad_sequence(ranked_questions)
+        que_embeds = model.compute_que_embed(pad_questions, question_lengths,
+                                             alignment_question_indexs, None, before_alignment)
+        ret_que_embeds.append(que_embeds.detach().cpu().numpy())
+    return np.concatenate(ret_que_embeds)
+
+# get the embedding of relations. If before_alignment is False, then the
+# embedding after the alignment model will be returned. Otherwise, the embedding
+# before the alignment model will be returned
+def get_rel_embed(model, sample_list, all_relations, alignment_model, batch_size, device,
+                  before_alignment=False):
+    ret_rel_embeds = []
+    for i in range((len(sample_list)-1)//batch_size+1):
+        samples = sample_list[i*batch_size:(i+1)*batch_size]
+        relations = []
+        for item in samples:
+            this_relation = torch.tensor(all_relations[item[0]],
+                                         dtype=torch.long).to(device)
+            relations.append(this_relation)
+        #print(len(relations))
+        model.init_hidden(device, len(relations))
+        ranked_relations, alignment_relation_indexs = \
+            ranking_sequence(relations)
+        relation_lengths = [len(relation) for relation in ranked_relations]
+        #print(ranked_relations)
+        pad_relations = torch.nn.utils.rnn.pad_sequence(ranked_relations)
+        rel_embeds = model.compute_rel_embed(pad_relations, relation_lengths,
+                                             alignment_relation_indexs,
+                                             alignment_model, before_alignment)
+        ret_rel_embeds.append(rel_embeds.detach().cpu().numpy())
+    return np.concatenate(ret_rel_embeds)
+
+def select_data(model, samples, num_sel_data, all_relations, batch_size, device):
+    que_embeds = get_que_embed(model, samples, all_relations, batch_size, device)  # 获取每个句子的embedding，400维
+    que_embeds = preprocessing.normalize(que_embeds)  # sklearn normalize函数
+    #print(que_embeds[:5])
+    num_clusters = min(num_sel_data, len(samples))  # 将sample聚类到 min(num_sel_data, len(samples))个类，每个类取出一个座位selected sample放入memory
+    distances = KMeans(n_clusters=num_clusters,
+                       random_state=0).fit_transform(que_embeds)
+    selected_samples = []
+    for i in range(num_clusters):
+        sel_index = np.argmin(distances[:,i])
+        selected_samples.append(samples[sel_index])
+    return selected_samples
