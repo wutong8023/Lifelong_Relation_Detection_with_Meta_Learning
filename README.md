@@ -1,4 +1,4 @@
-Code for our NAACL 2019 paper:
+Code based on NAACL 2019 paper:
 
 ## Sentence Embedding Alignment for Lifelong Relation Extraction
 
