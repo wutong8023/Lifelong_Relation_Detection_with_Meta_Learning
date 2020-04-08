@@ -18,8 +18,6 @@ class BiLSTM(nn.Module):
         super(BiLSTM, self).__init__()
         self.hidden_dim = hidden_dim
         self.batch_size = batch_size
-
-
         # The LSTM takes word embeddings as inputs, and outputs hidden states
         # with dimensionality hidden_dim.
         self.lstm = nn.LSTM(embedding_dim, hidden_dim, bidirectional=True)
@@ -48,13 +46,10 @@ class BiLSTM(nn.Module):
         #self.hidden[1] = self.hidden[1].to(device)
 
     def forward(self, packed_embeds):
-        #print(packed_embeds)
-        #print(self.hidden)
         lstm_out, self.hidden = self.lstm(packed_embeds, self.hidden)
-        #maxpool_hidden = self.maxpool(lstm_out.view(1,len(sentence), -1))
         permuted_hidden = self.hidden[0].permute([1,0,2]).contiguous()
-        #print(permuted_hidden.size())
         return permuted_hidden.view(-1, self.hidden_dim*2)
+
 
 class SimilarityModel(nn.Module):
     def __init__(self, embedding_dim, hidden_dim, vocab_size, vocab_embedding,
@@ -75,15 +70,12 @@ class SimilarityModel(nn.Module):
         self.relation_biLstm.init_hidden(device, batch_size)
 
     def init_embedding(self, vocab_embedding):
-        #print(self.word_embeddings(torch.tensor([27]).cuda()))
         self.word_embeddings.weight.data.copy_(torch.from_numpy(vocab_embedding))
-        #print(self.word_embeddings(torch.tensor([27]).cuda()))
 
     def ranking_sequence(self, sequence):
         word_lengths = torch.tensor([len(sentence) for sentence in sequence])
         rankedi_word, indexs = word_lengths.sort(descending = True)
         ranked_indexs, inverse_indexs = indexs.sort()
-        #print(indexs)
         sequence = [sequence[i] for i in indexs]
         return sequence, inverse_indexs
 
@@ -141,7 +133,6 @@ class SimilarityModel(nn.Module):
             avg_pooling = torch.mean(torch.stack((origin_score,
                                                     reverse_score)),0)
             return reverse_score
-            #return max_pooling
         else:
             cos = nn.CosineSimilarity(dim=1)
             return cos(question_embedding, relation_embedding)

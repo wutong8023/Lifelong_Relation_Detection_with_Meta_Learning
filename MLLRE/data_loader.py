@@ -48,6 +48,7 @@ def read_relation(file_path):
     if not os.path.exists(file_path):
         raise Exception('No such file %s' % file_path)
 
+
     with open(file_path, 'r', encoding='utf8') as f:
         relation_list = []
         relation_list.append('/fill/fill/fill')
@@ -203,19 +204,19 @@ def random_split_relation(task_num, relation_dict):
 def split_data(data, vocabulary, rel2cluster, task_num, instance_num=-1):  # -1 means all
     separated_data = [None] * task_num
     for rel, items in data.items():
-        rel_culter = rel2cluster[rel]
-        if instance_num > 0 :
-            selected_samples = random.sample(items, instance_num)
-        else:
-            selected_samples = items[:]
+        rel_cluster = rel2cluster[rel]
+        items = transform_questions(items, vocabulary)
 
-        if separated_data[rel_culter] is None:
-            separated_data[rel_culter] = selected_samples
+        if instance_num >= 0:
+            sampled_data = random.sample(items, instance_num)
         else:
-            separated_data[rel_culter].extend(selected_samples)
+            sampled_data = items
 
-    for i in range(len(separated_data)):
-        separated_data[i] = transform_questions(separated_data[i], vocabulary)
+        if separated_data[rel_cluster] is None:
+            separated_data[rel_cluster] = sampled_data
+        else:
+            separated_data[rel_cluster].extend(sampled_data)
+
     return separated_data
 
 def split_relation(relation):
@@ -252,9 +253,14 @@ def rel_glove_feature(relation_file, glove_file):
 def rel_kg_feature():
     pass
 
-def cluster_data_by_glove(task_num, ):
+def cluster_data_by_glove(task_num, rel_features):
+    cluster = KMeans(n_clusters=task_num).fit(rel_features)
+    label = cluster.labels_
+    rel2label = {}
+    for index in range(len(label)):
+        rel2label[index] = label[index]
     # waits implement
-    pass
+    return rel2label
 
 def cluster_data_by_kg(task_num):
     # waits implement
@@ -279,7 +285,9 @@ def load_data(train_file, valid_file, test_file, relation_file, glove_file, embe
             raise Exception('rel_encode method %s not implement.' % rel_encode)
 
     elif task_arrange == 'cluster_by_glove_embedding':
-        rel2cluster, rel_features = cluster_data_by_glove(task_num)
+        rel_features = rel_glove_feature(relation_file, glove_file)
+        rel2cluster = cluster_data_by_glove(task_num, rel_features)
+
     elif task_arrange == 'cluster_by_kg_embedding':
         rel2cluster, rel_features = cluster_data_by_kg(task_num)
     else:
@@ -289,4 +297,5 @@ def load_data(train_file, valid_file, test_file, relation_file, glove_file, embe
     split_test_data = split_data(test_data_dict, vocabulary, rel2cluster, task_num)
     split_valid_data = split_data(valid_data_dict, vocabulary, rel2cluster, task_num)
 
-    return split_train_data, split_test_data, split_valid_data, relation_numbers, rel_features, vocabulary, embedding
+    return split_train_data, train_data_dict, split_test_data, test_data_dict, split_valid_data, valid_data_dict, \
+           relation_numbers, rel_features, vocabulary, embedding

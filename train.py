@@ -23,6 +23,7 @@ random.seed(100)
 origin_relation_names = read_origin_relation()
 
 
+
 def feed_samples(model, samples, loss_function, all_relations, device,
                  alignment_model=None):
     questions, relations, relation_set_lengths = process_samples(

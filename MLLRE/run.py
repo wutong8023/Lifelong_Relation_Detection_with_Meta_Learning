@@ -13,53 +13,7 @@ import random
 from model import SimilarityModel
 from copy import deepcopy
 import torch.optim as optim
-
-# process the data by adding questions
-def process_testing_samples(sample_list, all_relations, device):
-    questions = []
-    relations = []
-    gold_relation_indexs = []
-    relation_set_lengths = []
-    for sample in sample_list:
-        question = torch.tensor(sample[2], dtype=torch.long).to(device)
-        #print(relations[sample[0]])
-        #print(sample)
-        gold_relation_indexs.append(sample[0])
-        neg_relations = [torch.tensor(all_relations[index],
-                                      dtype=torch.long).to(device)
-                         for index in sample[1]]
-        relation_set_lengths.append(len(neg_relations))
-        relations += neg_relations
-        #questions += [question for i in range(relation_set_lengths[-1])]
-        questions += [question] * relation_set_lengths[-1]
-    return gold_relation_indexs, questions, relations, relation_set_lengths
-
-def process_samples(sample_list, all_relations, device):
-    questions = []
-    relations = []
-    relation_set_lengths = []
-    for sample in sample_list:
-        question = torch.tensor(sample[2], dtype=torch.long).to(device)
-        #print(relations[sample[0]])
-        #print(sample)
-        pos_relation = torch.tensor(all_relations[sample[0]],
-                                    dtype=torch.long).to(device)  # 正确关系的tensor，一维数组
-        neg_relations = [torch.tensor(all_relations[index],
-                                      dtype=torch.long).to(device)
-                         for index in sample[1]]  # 候选的错误关系tensor
-        relation_set_lengths.append(len(neg_relations)+1)
-        relations += [pos_relation] + neg_relations  # 合并
-        #questions += [question for i in range(relation_set_lengths[-1])]
-        questions += [question] * relation_set_lengths[-1]
-    return questions, relations, relation_set_lengths
-
-def ranking_sequence(sequence):
-    word_lengths = torch.tensor([len(sentence) for sentence in sequence])
-    rankedi_word, indexs = word_lengths.sort(descending = True)
-    ranked_indexs, inverse_indexs = indexs.sort()
-    #print(indexs)
-    sequence = [sequence[i] for i in indexs]
-    return sequence, inverse_indexs
+import math
 
 def feed_samples(model, samples, loss_function, all_relations, device,
                  alignment_model=None):
@@ -185,12 +139,14 @@ def main():
                         help='relation name file')
     parser.add_argument('--glove_file', default='dataset/glove.6B.300d.txt',
                         help='glove embedding file')
+    parser.add_argument('--kl_dist_file', default='dataset/kl_dist_ht.json',
+                        help='glove embedding file')
     parser.add_argument('--embedding_dim', default=300, type=int,
                         help='word embeddings dimensional')
     parser.add_argument('--hidden_dim', default=200, type=int,
                         help='BiLSTM hidden dimensional')
-    parser.add_argument('--task_arrange', default='random',
-                        help='task arrangement method')
+    parser.add_argument('--task_arrange', default='cluster_by_glove_embedding',
+                        help='task arrangement method, e.g. cluster_by_glove_embedding, random')
     parser.add_argument('--rel_encode', default='glove',
                         help='relation encode method')
     parser.add_argument('--meta_method', default='reptile',
@@ -203,25 +159,28 @@ def main():
                         help='number of instances for one relation, -1 means all.')
     parser.add_argument('--loss_margin', default=0.5, type=float,
                         help='loss margin setting')
-    parser.add_argument('--outside_epoch', default=40, type=float,
+    parser.add_argument('--outside_epoch', default=200, type=float,
                         help='task level epoch')
-    parser.add_argument('--step_size', default=0.5, type=float,
+    parser.add_argument('--early_stop', default=20, type=float,
+                        help='task level epoch')
+    parser.add_argument('--step_size', default=0.6, type=float,
                         help='step size Epsilon')
-    parser.add_argument('--learning_rate', default=5e-3, type=float,
+    parser.add_argument('--learning_rate', default=2e-3, type=float,
                         help='learning rate')
-    parser.add_argument('--num_samplers', default=50, type=int,
-                        help='number of samplers selected in one task')
-    parser.add_argument('--random_seed', default=317, type=int,
+    parser.add_argument('--random_seed', default=226, type=int,
                         help='random seed')
     parser.add_argument('--task_memory_size', default=50, type=int,
                         help='number of samples for each task')
-    parser.add_argument('--memory_select_method', default='random',
-                        help='the method of sample memory data')
-
+    parser.add_argument('--memory_select_method', default='vec_cluster',
+                        help='the method of sample memory data, e.g. vec_cluster, random, difficulty')
+    parser.add_argument('--curriculum_rel_num', default=3,
+                        help='curriculum learning relation sampled number for current training relation')
+    parser.add_argument('--curriculum_instance_num', default=5,
+                        help='curriculum learning instance sampled number for a sampled relation')
 
 
     opt = parser.parse_args()
-
+    print(opt)
     random.seed(opt.random_seed)
     torch.manual_seed(opt.random_seed)
     np.random.seed(opt.random_seed)
@@ -230,13 +189,21 @@ def main():
     device = torch.device(('cuda:%d' % opt.cuda_id) if torch.cuda.is_available() and opt.cuda_id >= 0 else 'cpu')
 
     # do following process
-    split_train_data, split_test_data, split_valid_data, relation_numbers, rel_features, vocabulary, embedding = \
+    split_train_data, train_data_dict, split_test_data, test_data_dict, split_valid_data, valid_data_dict, \
+    relation_numbers, rel_features, vocabulary, embedding = \
         load_data(opt.train_file, opt.valid_file, opt.test_file, opt.relation_file, opt.glove_file,
-                            opt.embedding_dim, opt.task_arrange, opt.rel_encode, opt.task_num,
-                            opt.train_instance_num)
+                  opt.embedding_dim, opt.task_arrange, opt.rel_encode, opt.task_num,
+                  opt.train_instance_num)
+
+    # kl similarity of the joint distribution of head and tail
+    kl_dist_ht = read_json(opt.kl_dist_file)
+
+    # tmp = [[0, 1, 2, 3], [1, 0, 4, 6], [2, 4, 0, 5], [3, 6, 5, 0]]
+    sorted_sililarity_index = np.argsort(-np.asarray(kl_dist_ht), axis=1) + 1
+
     # prepare model
     inner_model = SimilarityModel(opt.embedding_dim, opt.hidden_dim, len(vocabulary),
-                            np.array(embedding), 1, device)
+                                  np.array(embedding), 1, device)
 
     memory_data = []
     memory_question_embed = []
@@ -271,6 +238,9 @@ def main():
         inner_model = inner_model.to(device)
         optimizer = optim.Adam(inner_model.parameters(), lr=opt.learning_rate)
         t = tqdm(range(opt.outside_epoch))
+        best_valid_acc = 0.0
+        early_stop = 0
+        best_checkpoint = ''
         for epoch in t:
             batch_num = (len(current_train_data) - 1) // opt.batch_size + 1
             total_loss = 0.0
@@ -283,46 +253,126 @@ def main():
                         all_seen_data += one_batch_memory
 
                     memory_batch = memory_data[memory_index]
+                    batch_train_data.extend(memory_batch)
+                    # scores, loss = feed_samples(inner_model, memory_batch, loss_function, relation_numbers, device)
+                    # optimizer.step()
+                    memory_index = (memory_index+1) % len(memory_data)
+                # random.shuffle(batch_train_data)
 
-                    scores, loss = feed_samples(inner_model, memory_batch, loss_function, relation_numbers, device)
+                # curriculum before batch_train
+                if task_index > 0:
+                    current_train_rel = batch_train_data[0][0]
+                    current_rel_similarity_sorted_index = sorted_sililarity_index[current_train_rel + 1]
+                    seen_relation_sorted_index = []
+                    for rel in current_rel_similarity_sorted_index:
+                        if rel in seen_relations:
+                            seen_relation_sorted_index.append(rel)
+
+                    curriculum_rel_list = []
+                    if opt.curriculum_rel_num >= len(seen_relation_sorted_index):
+                        curriculum_rel_list = seen_relation_sorted_index[:]
+                    else:
+                        step = len(seen_relation_sorted_index) // opt.curriculum_rel_num
+                        for i in range(0, len(seen_relation_sorted_index), step):
+                            curriculum_rel_list.append(seen_relation_sorted_index[i])
+
+                    curriculum_instance_list = []
+                    for curriculum_rel in curriculum_rel_list:
+                        curriculum_instance_list.extend(random.sample(train_data_dict[curriculum_rel], opt.curriculum_instance_num))
+
+                    curriculum_instance_list = remove_unseen_relation(curriculum_instance_list, seen_relations)
+                    # optimizer.zero_grad()
+                    scores, loss = feed_samples(inner_model, curriculum_instance_list, loss_function, relation_numbers, device)
+                    # loss.backward()
+                    optimizer.step()
 
                 scores, loss = feed_samples(inner_model, batch_train_data, loss_function, relation_numbers, device)
-                total_loss += loss
                 optimizer.step()
+                total_loss += loss
+
+            # valid test
+            valid_acc = evaluate_model(inner_model, current_valid_data, opt.batch_size, relation_numbers, device)
+            # checkpoint
+            checkpoint = {'net_state': inner_model.state_dict(), 'optimizer': optimizer.state_dict()}
+            if valid_acc > best_valid_acc:
+                best_checkpoint = './checkpoint/checkpoint_task%d_epoch%d.pth.tar' % (task_index, epoch)
+                torch.save(checkpoint, best_checkpoint)
+                best_valid_acc = valid_acc
+                early_stop = 0
+            else:
+                early_stop += 1
+
             # print()
             t.set_description('Task %i Epoch %i' % (task_index+1, epoch+1))
-            t.set_postfix(loss=total_loss.item())
+            t.set_postfix(loss=total_loss.item(), valid_acc=valid_acc, early_stop=early_stop, best_checkpoint=best_checkpoint)
             t.update(1)
-            # for param in inner_model.parameters():
-            #     param.data -= opt.learning_rate * param.grad.data  # 根据梯度信息，手动step更新梯度
 
-        weights_after = inner_model.state_dict()  # 经过inner_epoch轮次的梯度更新后weights
-        outerstepsize = opt.step_size * (1 - task_index / opt.task_num)  # linear schedule
-        inner_model.load_state_dict({name: weights_before[name] + (weights_after[name] - weights_before[name]) * outerstepsize
-                               for name in weights_before})
+            if early_stop >= opt.early_stop:
+                # 已经充分训练了
+                break
+        t.close()
+        print('Load best check point from %s' % best_checkpoint)
+        checkpoint = torch.load(best_checkpoint)
+
+        weights_after = checkpoint['net_state']
+
+        # weights_after = inner_model.state_dict()  # 经过inner_epoch轮次的梯度更新后weights
+        # if task_index == opt.task_num - 1:
+        #     outer_step_size = opt.step_size * (1 - 5 / opt.task_num)
+        # else:
+        outer_step_size = math.sqrt(opt.step_size * (1 - task_index / opt.task_num))
+        # outer_step_size = opt.step_size / opt.task_num
+        # outer_step_size = 0.4
+        inner_model.load_state_dict({name: weights_before[name] + (weights_after[name] - weights_before[name]) * outer_step_size
+                                     for name in weights_before})
+
+        # 用memory进行训练：
+        # for i in range(5):
+        #     for one_batch_memory in memory_data:
+        #         scores, loss = feed_samples(inner_model, one_batch_memory, loss_function, relation_numbers, device)
+        #         optimizer.step()
 
         results = [evaluate_model(inner_model, test_data, opt.batch_size, relation_numbers, device)
                    for test_data in current_test_data]  # 使用current model和alignment model对test data进行一个预测
 
         # sample memory from current_train_data
-        memory_data.append(select_data(inner_model, current_train_data, opt.task_memory_size,
-                                       relation_numbers, opt.batch_size, device))  # memorydata是一个list，list中的每个元素都是一个包含selected_num个sample的list
+        if opt.memory_select_method == 'random':
+            memory_data.append(random_select_data(current_train_data, int(opt.task_memory_size / results[-1])))
+        elif opt.memory_select_method == 'vec_cluster':
+            memory_data.append(select_data(inner_model, current_train_data, int(opt.task_memory_size / results[-1]),
+                                           relation_numbers, opt.batch_size, device))  # memorydata是一个list，list中的每个元素都是一个包含selected_num个sample的list
+        elif opt.memory_select_method == 'difficulty':
+            memory_data.append()
 
         print_list(results)
+        avg_result = sum(results) / len(results)
+        test_set_size = [len(testdata) for testdata in current_test_data]
+        whole_result = sum([results[i] * test_set_size[i] for i in range(len(current_test_data))]) / sum(test_set_size)
+        print('test_set_size: [%s]' % ', '.join([str(size) for size in test_set_size]))
+        print('avg_acc: %.3f, whole_acc: %.3f' % (avg_result, whole_result))
 
 
+    print('test_all:')
+    for epoch in range(10):
+        current_test_data = []
+        for previous_task_id in range(opt.task_num):
+            current_test_data.append(remove_unseen_relation(split_test_data[previous_task_id], seen_relations))
 
+        loss_function = nn.MarginRankingLoss(opt.loss_margin)
+        optimizer = optim.Adam(inner_model.parameters(), lr=opt.learning_rate)
+        optimizer.zero_grad()
+        for one_batch_memory in memory_data:
+            scores, loss = feed_samples(inner_model, one_batch_memory, loss_function, relation_numbers, device)
+            optimizer.step()
+        results = [evaluate_model(inner_model, test_data, opt.batch_size, relation_numbers, device)
+                   for test_data in current_test_data]
+        print(results)
+        avg_result = sum(results) / len(results)
+        test_set_size = [len(testdata) for testdata in current_test_data]
+        whole_result = sum([results[i] * test_set_size[i] for i in range(len(current_test_data))]) / sum(test_set_size)
+        print('test_set_size: [%s]' % ', '.join([str(size) for size in test_set_size]))
+        print('avg_acc: %.3f, whole_acc: %.3f' % (avg_result, whole_result))
 
-
-
-    # if opt.meta_method == 'reptile':
-    #     # use reptile to train model
-    #
-    # elif opt.meta_method == 'maml':
-    #     # use reptile to train model, wait implement
-    #     pass
-    # else:
-    #     raise Exception('meta method %s not implement' % opt.meta_method)
 
 
 
