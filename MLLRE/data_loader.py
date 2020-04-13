@@ -48,7 +48,6 @@ def read_relation(file_path):
     if not os.path.exists(file_path):
         raise Exception('No such file %s' % file_path)
 
-
     with open(file_path, 'r', encoding='utf8') as f:
         relation_list = []
         relation_list.append('/fill/fill/fill')

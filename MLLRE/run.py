@@ -374,7 +374,5 @@ def main():
         print('avg_acc: %.3f, whole_acc: %.3f' % (avg_result, whole_result))
 
 
-
-
 if __name__ == '__main__':
     main()
